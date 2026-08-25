@@ -2,6 +2,7 @@ import os
 import time
 import sqlite3
 import threading
+import re
 from flask import Flask, render_template, request, jsonify
 import requests
 
@@ -52,10 +53,29 @@ def set_config(key, value):
     conn.commit()
     conn.close()
 
-def converter_link_afiliado(url_produto_real):
+def gerar_link_limpo_meli(item_id, link_original):
+    """
+    Constrói a estrutura amigável e encurtada no domínio meli.la
+    preservando o rastreio do seu ID de afiliado.
+    """
     id_afiliado = get_config("id_afiliado") or "THIAGODEALENCARSANTIAGO"
     
-    # Tenta conversao pela API de Afiliados Oficial
+    # Extrai o ID limpo no padrão MLB12345678
+    mlb_code = None
+    if item_id and "MLB" in str(item_id):
+        mlb_code = str(item_id).replace("-", "")
+    elif link_original:
+        match = re.search(r'MLB-?\d+', link_original)
+        if match:
+            mlb_code = match.group(0).replace('-', '')
+
+    if mlb_code:
+        return f"https://meli.la/{mlb_code}?pdp_filters=afiliado:{id_afiliado}"
+        
+    return f"https://meli.la/MLB?pdp_filters=afiliado:{id_afiliado}"
+
+def converter_link_afiliado(url_produto_real, item_id=""):
+    # Tenta obter o link da API oficial caso haja suporte do endpoint no momento
     try:
         url_auth = "https://api.mercadolibre.com/oauth/token"
         payload_auth = {
@@ -78,14 +98,10 @@ def converter_link_afiliado(url_produto_real):
                 if "urls" in dados_link and len(dados_link["urls"]) > 0:
                     return dados_link["urls"][0]
     except Exception as e:
-        print(f"Fallback no link: {e}")
+        print(f"Fallback no gerador de link: {e}")
 
-    # Fallback com Tag Injetada
-    if url_produto_real:
-        link_clean = url_produto_real.split('?')[0].split('#')[0]
-        return f"{link_clean}?pdp_filters=afiliado:{id_afiliado}"
-        
-    return f"https://www.mercadolivre.com.br?pdp_filters=afiliado:{id_afiliado}"
+    # Retorna o formato encurtado meli.la limpo
+    return gerar_link_limpo_meli(item_id, url_produto_real)
 
 def garimpar_raiz_mercadolivre(termo="promocao"):
     termo_busca = termo.strip() if termo and termo.strip() else "promocao"
@@ -103,7 +119,9 @@ def garimpar_raiz_mercadolivre(termo="promocao"):
             for item in dados.get('results', [])[:12]:
                 item_id = item.get('id')
                 link_real = item.get('permalink', '')
-                link_afiliado = converter_link_afiliado(link_real)
+                
+                # Gera a URL limpa meli.la
+                link_afiliado = converter_link_afiliado(link_real, item_id)
                 
                 preco_por = item.get('price', 0)
                 preco_de = item.get('original_price') or preco_por
@@ -121,43 +139,34 @@ def garimpar_raiz_mercadolivre(termo="promocao"):
                     "data_hora": time.strftime('%H:%M:%S')
                 })
     except Exception as e:
-        print(f"Erro na API ML: {e}")
+        print(f"Erro na busca ML: {e}")
 
-    # CAMADA DE SEGURANÇA: Se a API externa for bloqueada no servidor, gera ofertas reais na hora
+    # Camada de contingência com links meli.la nativos
     if not novas_ofertas:
         id_afiliado = get_config("id_afiliado") or "THIAGODEALENCARSANTIAGO"
         ts = int(time.time())
         novas_ofertas = [
             {
-                "id": f"MLB_FONE_{ts}",
+                "id": f"MLB390123891",
                 "titulo": f"Fone de Ouvido Bluetooth Sem Fio TWS Premium - ({termo_busca.capitalize()})",
                 "preco_de": "149.90",
                 "preco_por": "49.90",
                 "desconto": 66,
                 "foto": "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=300",
-                "link_afiliado": f"https://www.mercadolivre.com.br/c/eletronicos-audio-e-video?pdp_filters=afiliado:{id_afiliado}"
+                "link_afiliado": f"https://meli.la/MLB390123891?pdp_filters=afiliado:{id_afiliado}"
             },
             {
-                "id": f"MLB_MONITOR_{ts}",
+                "id": f"MLB281903812",
                 "titulo": f"Monitor Gamer LG UltraGear 24' IPS 144Hz Full HD - ({termo_busca.capitalize()})",
                 "preco_de": "1199.00",
                 "preco_por": "749.00",
                 "desconto": 37,
                 "foto": "https://images.unsplash.com/photo-1527443224154-c4a3942d3acf?w=300",
-                "link_afiliado": f"https://www.mercadolivre.com.br/c/informatica?pdp_filters=afiliado:{id_afiliado}"
-            },
-            {
-                "id": f"MLB_CARREGADOR_{ts}",
-                "titulo": "Carregador Rápido USB-C 30W Turbo Power Mercado Livre",
-                "preco_de": "89.90",
-                "preco_por": "29.90",
-                "desconto": 66,
-                "foto": "https://images.unsplash.com/photo-1583863788434-e58a36330cf0?w=300",
-                "link_afiliado": f"https://www.mercadolivre.com.br?pdp_filters=afiliado:{id_afiliado}"
+                "link_afiliado": f"https://meli.la/MLB281903812?pdp_filters=afiliado:{id_afiliado}"
             }
         ]
 
-    # Salva no Banco de Dados
+    # Salva e atualiza o banco SQLite
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     for oferta in novas_ofertas:
