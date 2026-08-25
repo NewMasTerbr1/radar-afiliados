@@ -10,6 +10,10 @@ app = Flask(__name__)
 
 DB_NAME = "database.db"
 
+# --- CREDENCIAIS OFICIAIS DO MERCADO LIVRE DEVELOPERS ---
+ML_CLIENT_ID = "8007594247270161"
+ML_CLIENT_SECRET = "vD8K6J7kDDOLeTS9FDUmLoSTvHsAmRwO"
+
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -27,7 +31,7 @@ def init_db():
             data_hora TEXT
         )
     ''')
-    cursor.execute("INSERT OR IGNORE INTO config VALUES ('id_afiliado', 'THIAGODEALENCARSANTIAGO')")
+    cursor.execute("INSERT OR IGNORE INTO config VALUES ('id_afiliado', 'YL127R-A0VF')")
     cursor.execute("INSERT OR IGNORE INTO config VALUES ('auto_disparo_whatsapp', 'OFF')")
     cursor.execute("INSERT OR IGNORE INTO config VALUES ('webhook_whatsapp', '')")
     conn.commit()
@@ -50,22 +54,53 @@ def set_config(key, value):
     conn.commit()
     conn.close()
 
-def gerar_link_limpo_meli(item_id, link_original):
+# --- CONVERSÃO AUTOMÁTICA DE LINKS VIA API DE AFILIADOS ---
+def converter_link_afiliado_api(url_produto_real):
     """
-    Extrai o identificador MLB e gera o formato de link limpo meli.la
+    Usa o endpoint oficial da API de Afiliados (/affiliates/link_generator)
+    para converter a URL do produto no link de comissão oficial da sua conta.
     """
-    id_afiliado = get_config("id_afiliado") or "THIAGODEALENCARSANTIAGO"
+    id_afiliado = get_config("id_afiliado") or "YL127R-A0VF"
     
-    # Tenta capturar o código MLB via regex do link ou usa o ID do item
-    if item_id and item_id.startswith("MLB"):
-        mlb_code = item_id
-    else:
-        match = re.search(r'MLB-?\d+', link_original)
-        mlb_code = match.group(0).replace('-', '') if match else "MLB"
+    # 1. Obtenção do Token de Acesso via Client Credentials
+    url_auth = "https://api.mercadolibre.com/oauth/token"
+    payload_auth = {
+        "grant_type": "client_credentials",
+        "client_id": ML_CLIENT_ID,
+        "client_secret": ML_CLIENT_SECRET
+    }
+    
+    try:
+        resp_auth = requests.post(url_auth, data=payload_auth, timeout=5)
+        if resp_auth.status_code == 200:
+            access_token = resp_auth.json().get("access_token")
+            
+            # 2. Chamada ao gerador de links oficial de afiliados
+            url_generator = "https://api.mercadolibre.com/affiliates/link_generator"
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            }
+            payload_link = {
+                "urls": [url_produto_real]
+            }
+            
+            resp_link = requests.post(url_generator, json=payload_link, headers=headers, timeout=5)
+            if resp_link.status_code == 200:
+                dados_link = resp_link.json()
+                if "urls" in dados_link and len(dados_link["urls"]) > 0:
+                    return dados_link["urls"][0]
+    except Exception as e:
+        print(f"Erro na conversão de link via API: {e}")
 
-    # Retorna o link encurtado e limpo padrão meli.la
-    return f"https://meli.la/{mlb_code}?pdp_filters=afiliado:{id_afiliado}"
+    # Fallback estruturado caso a API atinja limite ou retorne erro
+    if url_produto_real and "mercadolivre.com" in url_produto_real:
+        link_clean = url_produto_real.split('?')[0].split('#')[0]
+        return f"{link_clean}?pdp_filters=afiliado:{id_afiliado}"
+        
+    return url_produto_real
 
+# --- MOTOR DE GARIMPO AUTOMÁTICO ---
 def garimpar_raiz_mercadolivre(termo="promocao"):
     url = f"https://api.mercadolibre.com/sites/MLB/search?q={termo}"
     headers = {
@@ -82,8 +117,8 @@ def garimpar_raiz_mercadolivre(termo="promocao"):
                 item_id = item.get('id')
                 link_real = item.get('permalink', '')
                 
-                # Gera a URL limpa no formato meli.la
-                link_limpo = gerar_link_limpo_meli(item_id, link_real)
+                # CONVERSÃO 100% AUTOMÁTICA
+                link_afiliado_oficial = converter_link_afiliado_api(link_real)
                 
                 preco_por = item.get('price', 0)
                 preco_de = item.get('original_price') or preco_por
@@ -96,57 +131,33 @@ def garimpar_raiz_mercadolivre(termo="promocao"):
                     "preco_por": f"{preco_por:.2f}",
                     "desconto": desconto,
                     "foto": item.get('thumbnail', '').replace("http://", "https://"),
-                    "link_afiliado": link_limpo,
+                    "link_afiliado": link_afiliado_oficial,
                     "status": "pendente",
                     "data_hora": time.strftime('%H:%M:%S')
                 })
     except Exception as e:
-        print(f"Erro garimpo: {e}")
+        print(f"Erro no garimpo: {e}")
 
-    # Fallback com produtos reais e links meli.la limpos
-    if not novas_ofertas:
-        id_afiliado = get_config("id_afiliado") or "THIAGODEALENCARSANTIAGO"
-        produtos_reais = [
-            {
-                "id": "MLB390123891",
-                "titulo": f"Fone de Ouvido Bluetooth Sem Fio TWS - Oferta ({termo.capitalize()})",
-                "preco_de": "150.00",
-                "preco_por": "49.90",
-                "desconto": 66,
-                "foto": "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=300",
-                "link_afiliado": f"https://meli.la/MLB390123891"
-            },
-            {
-                "id": "MLB281903812",
-                "titulo": "Monitor Gamer LG UltraGear 24' IPS 144Hz Full HD",
-                "preco_de": "1199.00",
-                "preco_por": "799.00",
-                "desconto": 33,
-                "foto": "https://images.unsplash.com/photo-1527443224154-c4a3942d3acf?w=300",
-                "link_afiliado": f"https://meli.la/MLB281903812"
-            }
-        ]
-        novas_ofertas = produtos_reais
-
-    # Persistência no banco SQLite
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    for oferta in novas_ofertas:
-        cursor.execute("SELECT id FROM ofertas WHERE id = ?", (oferta['id'],))
-        if not cursor.fetchone():
-            cursor.execute('''
-                INSERT INTO ofertas VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                oferta['id'], oferta['titulo'], oferta['preco_de'], oferta['preco_por'],
-                oferta['desconto'], oferta['foto'], oferta['link_afiliado'], 'pendente', time.strftime('%H:%M:%S')
-            ))
-            conn.commit()
-
-            if get_config("auto_disparo_whatsapp") == "ON":
-                disparar_whatsapp_api(oferta)
-                cursor.execute("UPDATE ofertas SET status = 'enviado' WHERE id = ?", (oferta['id'],))
+    # Salva os produtos no banco SQLite
+    if novas_ofertas:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        for oferta in novas_ofertas:
+            cursor.execute("SELECT id FROM ofertas WHERE id = ?", (oferta['id'],))
+            if not cursor.fetchone():
+                cursor.execute('''
+                    INSERT INTO ofertas VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    oferta['id'], oferta['titulo'], oferta['preco_de'], oferta['preco_por'],
+                    oferta['desconto'], oferta['foto'], oferta['link_afiliado'], 'pendente', time.strftime('%H:%M:%S')
+                ))
                 conn.commit()
-    conn.close()
+
+                if get_config("auto_disparo_whatsapp") == "ON":
+                    disparar_whatsapp_api(oferta)
+                    cursor.execute("UPDATE ofertas SET status = 'enviado' WHERE id = ?", (oferta['id'],))
+                    conn.commit()
+        conn.close()
 
     return novas_ofertas
 
@@ -163,7 +174,7 @@ def disparar_whatsapp_api(oferta):
         try:
             requests.post(webhook_url, json={"message": texto, "image": oferta['foto']}, timeout=5)
         except Exception as e:
-            print(f"Erro webhook: {e}")
+            print(f"Erro no disparo webhook: {e}")
 
 def worker_auto_garimpo():
     while True:
