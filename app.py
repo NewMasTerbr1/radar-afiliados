@@ -10,7 +10,6 @@ app = Flask(__name__)
 
 DB_NAME = "database.db"
 
-# --- CREDENCIAIS OFICIAIS DO MERCADO LIVRE DEVELOPERS ---
 ML_CLIENT_ID = "8007594247270161"
 ML_CLIENT_SECRET = "vD8K6J7kDDOLeTS9FDUmLoSTvHsAmRwO"
 
@@ -54,70 +53,62 @@ def set_config(key, value):
     conn.commit()
     conn.close()
 
-# --- CONVERSÃO AUTOMÁTICA DE LINKS VIA API DE AFILIADOS ---
 def converter_link_afiliado_api(url_produto_real):
     """
-    Usa o endpoint oficial da API de Afiliados (/affiliates/link_generator)
-    para converter a URL do produto no link de comissão oficial da sua conta.
+    Tenta converter via API de Afiliados.
+    Se falhar ou der erro de auth, aplica o fallback direto no link com seu ID de afiliado.
     """
-    id_afiliado = get_config("id_afiliado") or "YL127R-A0VF"
-    
-    # 1. Obtenção do Token de Acesso via Client Credentials
-    url_auth = "https://api.mercadolibre.com/oauth/token"
-    payload_auth = {
-        "grant_type": "client_credentials",
-        "client_id": ML_CLIENT_ID,
-        "client_secret": ML_CLIENT_SECRET
-    }
+    id_afiliado = get_config("id_afiliado") or "THIAGODEALENCARSANTIAGO"
     
     try:
-        resp_auth = requests.post(url_auth, data=payload_auth, timeout=5)
+        url_auth = "https://api.mercadolibre.com/oauth/token"
+        payload_auth = {
+            "grant_type": "client_credentials",
+            "client_id": ML_CLIENT_ID,
+            "client_secret": ML_CLIENT_SECRET
+        }
+        resp_auth = requests.post(url_auth, data=payload_auth, timeout=3)
         if resp_auth.status_code == 200:
             access_token = resp_auth.json().get("access_token")
-            
-            # 2. Chamada ao gerador de links oficial de afiliados
             url_generator = "https://api.mercadolibre.com/affiliates/link_generator"
             headers = {
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json"
             }
-            payload_link = {
-                "urls": [url_produto_real]
-            }
-            
-            resp_link = requests.post(url_generator, json=payload_link, headers=headers, timeout=5)
+            payload_link = {"urls": [url_produto_real]}
+            resp_link = requests.post(url_generator, json=payload_link, headers=headers, timeout=3)
             if resp_link.status_code == 200:
                 dados_link = resp_link.json()
                 if "urls" in dados_link and len(dados_link["urls"]) > 0:
                     return dados_link["urls"][0]
     except Exception as e:
-        print(f"Erro na conversão de link via API: {e}")
+        print(f"Aviso conversao API: {e}")
 
-    # Fallback estruturado caso a API atinja limite ou retorne erro
-    if url_produto_real and "mercadolivre.com" in url_produto_real:
+    # Fallback garantido sem quebrar a busca
+    if url_produto_real:
         link_clean = url_produto_real.split('?')[0].split('#')[0]
         return f"{link_clean}?pdp_filters=afiliado:{id_afiliado}"
         
-    return url_produto_real
+    return f"https://www.mercadolivre.com.br?pdp_filters=afiliado:{id_afiliado}"
 
-# --- MOTOR DE GARIMPO AUTOMÁTICO ---
 def garimpar_raiz_mercadolivre(termo="promocao"):
     url = f"https://api.mercadolibre.com/sites/MLB/search?q={termo}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
 
     novas_ofertas = []
 
     try:
-        resp = requests.get(url, headers=headers, timeout=5)
+        resp = requests.get(url, headers=headers, timeout=7)
         if resp.status_code == 200:
             dados = resp.json()
-            for item in dados.get('results', [])[:9]:
+            resultados = dados.get('results', [])
+            
+            for item in resultados[:10]:
                 item_id = item.get('id')
                 link_real = item.get('permalink', '')
                 
-                # CONVERSÃO 100% AUTOMÁTICA
                 link_afiliado_oficial = converter_link_afiliado_api(link_real)
                 
                 preco_por = item.get('price', 0)
@@ -136,9 +127,9 @@ def garimpar_raiz_mercadolivre(termo="promocao"):
                     "data_hora": time.strftime('%H:%M:%S')
                 })
     except Exception as e:
-        print(f"Erro no garimpo: {e}")
+        print(f"Erro garimpo: {e}")
 
-    # Salva os produtos no banco SQLite
+    # Persiste os resultados encontrados
     if novas_ofertas:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -174,7 +165,7 @@ def disparar_whatsapp_api(oferta):
         try:
             requests.post(webhook_url, json={"message": texto, "image": oferta['foto']}, timeout=5)
         except Exception as e:
-            print(f"Erro no disparo webhook: {e}")
+            print(f"Erro webhook: {e}")
 
 def worker_auto_garimpo():
     while True:
@@ -213,6 +204,9 @@ def toggle_auto():
 @app.route('/api/garimpar', methods=['POST'])
 def api_garimpar():
     termo = request.json.get('termo', 'promocao')
+    if not termo.strip():
+        termo = "promocao"
+        
     garimpar_raiz_mercadolivre(termo=termo)
     
     conn = sqlite3.connect(DB_NAME)
