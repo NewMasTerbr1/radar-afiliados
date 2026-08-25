@@ -13,14 +13,12 @@ DB_NAME = "database.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    # Tabela de Configurações
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS config (
             key TEXT PRIMARY KEY,
             value TEXT
         )
     ''')
-    # Tabela de Ofertas
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ofertas (
             id TEXT PRIMARY KEY,
@@ -34,7 +32,6 @@ def init_db():
             data_hora TEXT
         )
     ''')
-    # Validações iniciais padrões
     cursor.execute("INSERT OR IGNORE INTO config VALUES ('id_afiliado', '')")
     cursor.execute("INSERT OR IGNORE INTO config VALUES ('auto_disparo_whatsapp', 'OFF')")
     cursor.execute("INSERT OR IGNORE INTO config VALUES ('webhook_whatsapp', '')")
@@ -59,13 +56,22 @@ def set_config(key, value):
     conn.close()
 
 # --- MOTOR DE GARIMPO NA RAIZ (MERCADO LIVRE API) ---
-def garimpar_raiz_mercadolivre(termo="promocao", desconto_minimo=15):
+def garimpar_raiz_mercadolivre(termo="fone", desconto_minimo=0):
     id_afiliado = get_config("id_afiliado")
-    url = f"https://api.mercadolibre.com/sites/MLB/search?q={termo}&sort=relevance"
     
+    # URL de busca oficial da API do Mercado Livre
+    url = f"https://api.mercadolibre.com/sites/MLB/search?q={termo}"
+    
+    # User-Agent necessário para liberar o tráfego no Mercado Livre
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
     try:
-        resposta = requests.get(url, timeout=10)
+        resposta = requests.get(url, headers=headers, timeout=10)
+        
         if resposta.status_code != 200:
+            print(f"Erro na requisição ML: Status {resposta.status_code}")
             return []
         
         dados = resposta.json()
@@ -80,14 +86,20 @@ def garimpar_raiz_mercadolivre(termo="promocao", desconto_minimo=15):
 
             desconto = int(((preco_original - preco_atual) / preco_original) * 100) if preco_original > preco_atual else 0
 
-            if desconto >= desconto_minimo or termo != "promocao":
+            if desconto >= desconto_minimo:
                 link_original = item.get('permalink', '')
-                # Formata link de comissão usando a tag do usuário
+                
+                # Monta a URL de afiliado com seu ID configurado
                 link_convertido = f"{link_original}?pdp_filters=afiliado:{id_afiliado}" if id_afiliado else link_original
+                
+                # Trata a foto do produto para alta resolução
                 foto_hd = item.get('thumbnail', '').replace("I.jpg", "O.jpg")
+                if foto_hd.startswith("http://"):
+                    foto_hd = foto_hd.replace("http://", "https://")
+
                 data_hora = time.strftime('%H:%M:%S')
 
-                # Salva no banco SQLite se for nova
+                # Insere ou atualiza a oferta no SQLite
                 cursor.execute("SELECT id FROM ofertas WHERE id = ?", (item_id,))
                 if not cursor.fetchone():
                     cursor.execute('''
@@ -118,26 +130,26 @@ def garimpar_raiz_mercadolivre(termo="promocao", desconto_minimo=15):
                     }
                     novas_ofertas.append(oferta_dict)
 
-                    # Se Auto-Disparo WhatsApp estiver LIGADO
+                    # Disparo automático se estiver ativado
                     if get_config("auto_disparo_whatsapp") == "ON":
                         disparar_whatsapp_api(oferta_dict)
                         cursor.execute("UPDATE ofertas SET status = 'enviado' WHERE id = ?", (item_id,))
                         conn.commit()
 
-            if len(novas_ofertas) >= 6:
+            if len(novas_ofertas) >= 9:
                 break
 
         conn.close()
         return novas_ofertas
     except Exception as e:
-        print(f"Erro na varredura: {e}")
+        print(f"Erro ao garimpar: {e}")
         return []
 
-# --- INTEGRAÇÃO DISPARO WHATSAPP ---
+# --- INTEGRAÇÃO WHATSAPP ---
 def disparar_whatsapp_api(oferta):
     webhook_url = get_config("webhook_whatsapp")
     texto = (
-        f"🔥 *OFERTA IMPERDÍVEL NO MERCADO LIVRE!*\n\n"
+        f"🔥 *OFERTA NO MERCADO LIVRE!*\n\n"
         f"📦 *{oferta['titulo']}*\n"
         f"❌ De: R$ {oferta['preco_de']}\n"
         f"✅ *Por apenas: R$ {oferta['preco_por']}* (-{oferta['desconto']}% OFF)\n\n"
@@ -147,23 +159,21 @@ def disparar_whatsapp_api(oferta):
     if webhook_url:
         try:
             requests.post(webhook_url, json={"message": texto, "image": oferta['foto']}, timeout=5)
-            print(f"📲 Disparado via Webhook WhatsApp: {oferta['titulo']}")
+            print(f"📲 Disparado via Webhook: {oferta['titulo']}")
         except Exception as e:
-            print(f"Erro ao disparar Webhook WhatsApp: {e}")
-    else:
-        print(f"📲 Simulação Disparo WhatsApp (Sem Webhook configurado): {oferta['titulo']}")
+            print(f"Erro ao disparar Webhook: {e}")
 
-# --- WORKER EM SEGUNDO PLANO (VARREDURA 24/7) ---
+# --- WORKER EM SEGUNDO PLANO ---
 def worker_auto_garimpo():
     while True:
         if get_config("auto_disparo_whatsapp") == "ON":
-            garimpar_raiz_mercadolivre(termo="promocao", desconto_minimo=20)
-        time.sleep(30) # Intervalo da varredura automática
+            garimpar_raiz_mercadolivre(termo="ofertas", desconto_minimo=10)
+        time.sleep(30)
 
 thread_bot = threading.Thread(target=worker_auto_garimpo, daemon=True)
 thread_bot.start()
 
-# --- ROTAS HTTP / API ---
+# --- ROTAS DA APLICAÇÃO ---
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -191,8 +201,11 @@ def toggle_auto():
 
 @app.route('/api/garimpar', methods=['POST'])
 def api_garimpar():
-    termo = request.json.get('termo', 'promocao')
-    garimpar_raiz_mercadolivre(termo=termo)
+    termo = request.json.get('termo', 'fone')
+    if not termo.strip():
+        termo = "fone"
+        
+    garimpar_raiz_mercadolivre(termo=termo, desconto_minimo=0)
     
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
