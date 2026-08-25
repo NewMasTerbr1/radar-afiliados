@@ -54,10 +54,6 @@ def set_config(key, value):
     conn.close()
 
 def converter_link_afiliado_api(url_produto_real):
-    """
-    Tenta converter via API de Afiliados.
-    Se falhar ou der erro de auth, aplica o fallback direto no link com seu ID de afiliado.
-    """
     id_afiliado = get_config("id_afiliado") or "THIAGODEALENCARSANTIAGO"
     
     try:
@@ -82,9 +78,9 @@ def converter_link_afiliado_api(url_produto_real):
                 if "urls" in dados_link and len(dados_link["urls"]) > 0:
                     return dados_link["urls"][0]
     except Exception as e:
-        print(f"Aviso conversao API: {e}")
+        print(f"Erro API conversao: {e}")
 
-    # Fallback garantido sem quebrar a busca
+    # Fallback estruturado no formato oficial com seu ID
     if url_produto_real:
         link_clean = url_produto_real.split('?')[0].split('#')[0]
         return f"{link_clean}?pdp_filters=afiliado:{id_afiliado}"
@@ -92,20 +88,24 @@ def converter_link_afiliado_api(url_produto_real):
     return f"https://www.mercadolivre.com.br?pdp_filters=afiliado:{id_afiliado}"
 
 def garimpar_raiz_mercadolivre(termo="promocao"):
-    url = f"https://api.mercadolibre.com/sites/MLB/search?q={termo}"
+    # Garante busca com termos formatados
+    termo_busca = termo.strip() if termo.strip() else "promocao"
+    url = f"https://api.mercadolibre.com/sites/MLB/search?q={termo_busca}&sort=relevance"
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json"
     }
 
     novas_ofertas = []
 
     try:
-        resp = requests.get(url, headers=headers, timeout=7)
+        resp = requests.get(url, headers=headers, timeout=6)
         if resp.status_code == 200:
             dados = resp.json()
             resultados = dados.get('results', [])
             
-            for item in resultados[:10]:
+            for item in resultados[:12]:
                 item_id = item.get('id')
                 link_real = item.get('permalink', '')
                 
@@ -127,27 +127,25 @@ def garimpar_raiz_mercadolivre(termo="promocao"):
                     "data_hora": time.strftime('%H:%M:%S')
                 })
     except Exception as e:
-        print(f"Erro garimpo: {e}")
+        print(f"Erro ao buscar no ML: {e}")
 
-    # Persiste os resultados encontrados
+    # Salva e atualiza o banco de dados
     if novas_ofertas:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         for oferta in novas_ofertas:
-            cursor.execute("SELECT id FROM ofertas WHERE id = ?", (oferta['id'],))
-            if not cursor.fetchone():
-                cursor.execute('''
-                    INSERT INTO ofertas VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    oferta['id'], oferta['titulo'], oferta['preco_de'], oferta['preco_por'],
-                    oferta['desconto'], oferta['foto'], oferta['link_afiliado'], 'pendente', time.strftime('%H:%M:%S')
-                ))
-                conn.commit()
+            cursor.execute('''
+                INSERT OR REPLACE INTO ofertas VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                oferta['id'], oferta['titulo'], oferta['preco_de'], oferta['preco_por'],
+                oferta['desconto'], oferta['foto'], oferta['link_afiliado'], 'pendente', time.strftime('%H:%M:%S')
+            ))
+            conn.commit()
 
-                if get_config("auto_disparo_whatsapp") == "ON":
-                    disparar_whatsapp_api(oferta)
-                    cursor.execute("UPDATE ofertas SET status = 'enviado' WHERE id = ?", (oferta['id'],))
-                    conn.commit()
+            if get_config("auto_disparo_whatsapp") == "ON":
+                disparar_whatsapp_api(oferta)
+                cursor.execute("UPDATE ofertas SET status = 'enviado' WHERE id = ?", (oferta['id'],))
+                conn.commit()
         conn.close()
 
     return novas_ofertas
@@ -203,7 +201,8 @@ def toggle_auto():
 
 @app.route('/api/garimpar', methods=['POST'])
 def api_garimpar():
-    termo = request.json.get('termo', 'promocao')
+    data = request.json or {}
+    termo = data.get('termo', 'promocao')
     if not termo.strip():
         termo = "promocao"
         
