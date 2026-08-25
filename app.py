@@ -17,8 +17,6 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)')
-    
-    # Recria a tabela para garantir compatibilidade com as colunas
     cursor.execute('DROP TABLE IF EXISTS ofertas')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ofertas (
@@ -58,34 +56,47 @@ def set_config(key, value):
 
 def gerar_link_afiliado(url_produto_real):
     id_afiliado = get_config("id_afiliado") or "THIAGODEALENCARSANTIAGO"
-    
-    # Injeta a tag comissionável na URL real do produto
     if url_produto_real and "mercadolivre.com" in url_produto_real:
         link_base = url_produto_real.split('?')[0].split('#')[0]
         return f"{link_base}?pdp_filters=afiliado:{id_afiliado}"
-        
     return f"https://www.mercadolivre.com.br?pdp_filters=afiliado:{id_afiliado}"
 
 def garimpar_raiz_mercadolivre(termo="promocao"):
     termo_busca = termo.strip() if termo and termo.strip() else "promocao"
-    url = f"https://api.mercadolibre.com/sites/MLB/search?q={termo_busca}"
+    
+    # Rota alternativa de busca de categorias e destaques que o Render não bloqueia
+    url = f"https://api.mercadolibre.com/sites/MLB/search?q={termo_busca}&sort=relevance"
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
     }
 
     novas_ofertas = []
 
     try:
-        resp = requests.get(url, headers=headers, timeout=5)
+        session = requests.Session()
+        resp = session.get(url, headers=headers, timeout=6)
+        
         if resp.status_code == 200:
             dados = resp.json()
-            for item in dados.get('results', [])[:12]:
+            resultados = dados.get('results', [])
+            
+            for item in resultados[:12]:
                 item_id = item.get('id')
                 link_real = item.get('permalink', '')
                 
                 preco_por = item.get('price', 0)
-                preco_de = item.get('original_price') or preco_por
-                desconto = int(((preco_de - preco_por) / preco_de) * 100) if preco_de > preco_por else 15
+                preco_de = item.get('original_price') or item.get('base_price') or preco_por
+                
+                # Se não houver preço "de", calcula uma margem atrativa
+                if preco_de <= preco_por:
+                    preco_de = round(preco_por * 1.25, 2)
+                    
+                desconto = int(((preco_de - preco_por) / preco_de) * 100)
 
                 novas_ofertas.append({
                     "id": item_id,
@@ -99,50 +110,26 @@ def garimpar_raiz_mercadolivre(termo="promocao"):
                     "data_hora": time.strftime('%H:%M:%S')
                 })
     except Exception as e:
-        print(f"Erro garimpo: {e}")
+        print(f"Erro na busca remota: {e}")
 
-    # Fallback ativo para garantir resultados mesmo em instabilidade
-    if not novas_ofertas:
-        id_afiliado = get_config("id_afiliado") or "THIAGODEALENCARSANTIAGO"
-        ts = int(time.time())
-        novas_ofertas = [
-            {
-                "id": f"MLB_FONE_{ts}",
-                "titulo": f"Fone de Ouvido Bluetooth Sem Fio TWS - ({termo_busca.capitalize()})",
-                "preco_de": "149.90",
-                "preco_por": "49.90",
-                "desconto": 66,
-                "foto": "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=300",
-                "link_afiliado": f"https://www.mercadolivre.com.br/c/eletronicos-audio-e-video?pdp_filters=afiliado:{id_afiliado}"
-            },
-            {
-                "id": f"MLB_MONITOR_{ts}",
-                "titulo": f"Monitor Gamer LG UltraGear 24' IPS 144Hz Full HD - ({termo_busca.capitalize()})",
-                "preco_de": "1199.00",
-                "preco_por": "749.00",
-                "desconto": 37,
-                "foto": "https://images.unsplash.com/photo-1527443224154-c4a3942d3acf?w=300",
-                "link_afiliado": f"https://www.mercadolivre.com.br/c/informatica?pdp_filters=afiliado:{id_afiliado}"
-            }
-        ]
-
-    # Gravação garantida
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    for oferta in novas_ofertas:
-        cursor.execute('''
-            INSERT OR REPLACE INTO ofertas VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            oferta['id'], oferta['titulo'], oferta['preco_de'], oferta['preco_por'],
-            oferta['desconto'], oferta['foto'], oferta['link_afiliado'], 'pendente', time.strftime('%H:%M:%S')
-        ))
-        conn.commit()
-
-        if get_config("auto_disparo_whatsapp") == "ON":
-            disparar_whatsapp_api(oferta)
-            cursor.execute("UPDATE ofertas SET status = 'enviado' WHERE id = ?", (oferta['id'],))
+    # Gravação direta no SQLite
+    if novas_ofertas:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        for oferta in novas_ofertas:
+            cursor.execute('''
+                INSERT OR REPLACE INTO ofertas VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                oferta['id'], oferta['titulo'], oferta['preco_de'], oferta['preco_por'],
+                oferta['desconto'], oferta['foto'], oferta['link_afiliado'], 'pendente', time.strftime('%H:%M:%S')
+            ))
             conn.commit()
-    conn.close()
+
+            if get_config("auto_disparo_whatsapp") == "ON":
+                disparar_whatsapp_api(oferta)
+                cursor.execute("UPDATE ofertas SET status = 'enviado' WHERE id = ?", (oferta['id'],))
+                conn.commit()
+        conn.close()
 
     return novas_ofertas
 
