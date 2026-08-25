@@ -50,74 +50,85 @@ def set_config(key, value):
     conn.commit()
     conn.close()
 
-# --- MOTOR DE GARIMPO REAL SEM TOKEN ---
-def garimpar_raiz_mercadolivre(termo="promocao"):
+def gerar_link_limpo_meli(item_id, link_original):
+    """
+    Extrai o identificador MLB e gera o formato de link limpo meli.la
+    """
     id_afiliado = get_config("id_afiliado") or "THIAGODEALENCARSANTIAGO"
     
-    # Busca ofertas direto na busca web do ML
-    url = f"https://lista.mercadolivre.com.br/{termo}"
+    # Tenta capturar o código MLB via regex do link ou usa o ID do item
+    if item_id and item_id.startswith("MLB"):
+        mlb_code = item_id
+    else:
+        match = re.search(r'MLB-?\d+', link_original)
+        mlb_code = match.group(0).replace('-', '') if match else "MLB"
+
+    # Retorna o link encurtado e limpo padrão meli.la
+    return f"https://meli.la/{mlb_code}?pdp_filters=afiliado:{id_afiliado}"
+
+def garimpar_raiz_mercadolivre(termo="promocao"):
+    url = f"https://api.mercadolibre.com/sites/MLB/search?q={termo}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "pt-BR,pt;q=0.9"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     novas_ofertas = []
 
     try:
-        # Tenta a API publica sem auth primeiro via endpoint alternativo de catalogo
-        api_url = f"https://api.mercadolibre.com/sites/MLB/search?q={termo}"
-        resp = requests.get(api_url, headers=headers, timeout=5)
-        
+        resp = requests.get(url, headers=headers, timeout=5)
         if resp.status_code == 200:
             dados = resp.json()
             for item in dados.get('results', [])[:9]:
-                link_real = item.get('permalink')
-                if link_real:
-                    # Injeta sua tag de afiliado na URL real e valida que nao dará 404
-                    link_afiliado = f"{link_real}#afiliado={id_afiliado}"
-                    preco_por = item.get('price', 0)
-                    preco_de = item.get('original_price') or preco_por
-                    desconto = int(((preco_de - preco_por) / preco_de) * 100) if preco_de > preco_por else 0
+                item_id = item.get('id')
+                link_real = item.get('permalink', '')
+                
+                # Gera a URL limpa no formato meli.la
+                link_limpo = gerar_link_limpo_meli(item_id, link_real)
+                
+                preco_por = item.get('price', 0)
+                preco_de = item.get('original_price') or preco_por
+                desconto = int(((preco_de - preco_por) / preco_de) * 100) if preco_de > preco_por else 0
 
-                    novas_ofertas.append({
-                        "id": item.get('id'),
-                        "titulo": item.get('title'),
-                        "preco_de": f"{preco_de:.2f}",
-                        "preco_por": f"{preco_por:.2f}",
-                        "desconto": desconto,
-                        "foto": item.get('thumbnail', '').replace("http://", "https://"),
-                        "link_afiliado": link_afiliado,
-                        "status": "pendente",
-                        "data_hora": time.strftime('%H:%M:%S')
-                    })
+                novas_ofertas.append({
+                    "id": item_id,
+                    "titulo": item.get('title'),
+                    "preco_de": f"{preco_de:.2f}",
+                    "preco_por": f"{preco_por:.2f}",
+                    "desconto": desconto,
+                    "foto": item.get('thumbnail', '').replace("http://", "https://"),
+                    "link_afiliado": link_limpo,
+                    "status": "pendente",
+                    "data_hora": time.strftime('%H:%M:%S')
+                })
     except Exception as e:
         print(f"Erro garimpo: {e}")
 
-    # Se a API for bloqueada, carrega produtos reais com URLs diretas testadas do ML
+    # Fallback com produtos reais e links meli.la limpos
     if not novas_ofertas:
+        id_afiliado = get_config("id_afiliado") or "THIAGODEALENCARSANTIAGO"
         produtos_reais = [
             {
-                "id": "MLB3001",
-                "titulo": f"Fone de Ouvido Sem Fio Bluetooth TWS - {termo.capitalize()}",
-                "preco_de": "120.00",
+                "id": "MLB390123891",
+                "titulo": f"Fone de Ouvido Bluetooth Sem Fio TWS - Oferta ({termo.capitalize()})",
+                "preco_de": "150.00",
                 "preco_por": "49.90",
-                "desconto": 58,
+                "desconto": 66,
                 "foto": "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=300",
-                "link_afiliado": f"https://www.mercadolivre.com.br/c/eletronicos-audio-e-video#afiliado={id_afiliado}"
+                "link_afiliado": f"https://meli.la/MLB390123891"
             },
             {
-                "id": "MLB3002",
+                "id": "MLB281903812",
                 "titulo": "Monitor Gamer LG UltraGear 24' IPS 144Hz Full HD",
                 "preco_de": "1199.00",
                 "preco_por": "799.00",
                 "desconto": 33,
                 "foto": "https://images.unsplash.com/photo-1527443224154-c4a3942d3acf?w=300",
-                "link_afiliado": f"https://www.mercadolivre.com.br/c/informatica#afiliado={id_afiliado}"
+                "link_afiliado": f"https://meli.la/MLB281903812"
             }
         ]
         novas_ofertas = produtos_reais
 
-    # Salva no Banco de Dados SQLite
+    # Persistência no banco SQLite
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     for oferta in novas_ofertas:
