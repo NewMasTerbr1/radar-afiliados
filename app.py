@@ -7,7 +7,6 @@ import requests
 
 app = Flask(__name__)
 
-# --- BANCO DE DADOS LOCAL (SQLITE) ---
 DB_NAME = "database.db"
 
 def init_db():
@@ -32,7 +31,7 @@ def init_db():
             data_hora TEXT
         )
     ''')
-    cursor.execute("INSERT OR IGNORE INTO config VALUES ('id_afiliado', '')")
+    cursor.execute("INSERT OR IGNORE INTO config VALUES ('id_afiliado', 'THIAGODEALENCARSANTIAGO')")
     cursor.execute("INSERT OR IGNORE INTO config VALUES ('auto_disparo_whatsapp', 'OFF')")
     cursor.execute("INSERT OR IGNORE INTO config VALUES ('webhook_whatsapp', '')")
     conn.commit()
@@ -55,16 +54,10 @@ def set_config(key, value):
     conn.commit()
     conn.close()
 
-# --- BASE DE RECURSO / MOTOR DE GARIMPO ---
 def garimpar_raiz_mercadolivre(termo="fone", desconto_minimo=0):
-    id_afiliado = get_config("id_afiliado")
-    if not id_afiliado:
-        id_afiliado = "THIAGODEALENCARSANTIAGO"
-
+    id_afiliado = get_config("id_afiliado") or "THIAGODEALENCARSANTIAGO"
     url = f"https://api.mercadolibre.com/sites/MLB/search?q={termo}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     novas_ofertas = []
     
@@ -79,7 +72,7 @@ def garimpar_raiz_mercadolivre(termo="fone", desconto_minimo=0):
                 
                 link_original = item.get('permalink', 'https://www.mercadolivre.com.br')
                 link_convertido = f"{link_original}?pdp_filters=afiliado:{id_afiliado}"
-                foto_hd = item.get('thumbnail', '').replace("I.jpg", "O.jpg").replace("http://", "https://")
+                foto_hd = item.get('thumbnail', '').replace("http://", "https://")
 
                 novas_ofertas.append({
                     "id": item.get('id'),
@@ -91,23 +84,22 @@ def garimpar_raiz_mercadolivre(termo="fone", desconto_minimo=0):
                     "link_afiliado": link_convertido
                 })
     except Exception as e:
-        print(f"API externa restrita. Ativando motor de dados: {e}")
+        print(f"Erro na requisição: {e}")
 
-    # Fallback garantido se a API externa for bloqueada sem token
+    # Fallback de imagens com links HTTPS diretos e estáveis
     if not novas_ofertas:
         itens_base = [
-            {"id": "MLB101", "titulo": f"Fone de Ouvido Bluetooth Sem Fio TWS - Oferta Mercado Livre ({termo.capitalize()})", "preco_de": "150.00", "preco_por": "49.90", "desconto": 66, "foto": "https://http2.mlstatic.com/D_NQ_NP_667232-MLA47732688002_102021-O.webp"},
-            {"id": "MLB102", "titulo": f"Monitor Gamer 24' IPS 144Hz Full HD Mercado Livre", "preco_de": "999.00", "preco_por": "649.00", "desconto": 35, "foto": "https://http2.mlstatic.com/D_NQ_NP_897519-MLA51361257321_082022-O.webp"},
-            {"id": "MLB103", "titulo": f"Carregador Rápido USB-C 30W Turbo Power", "preco_de": "89.90", "preco_por": "29.90", "desconto": 66, "foto": "https://http2.mlstatic.com/D_NQ_NP_723307-MLA48858292837_012022-O.webp"},
-            {"id": "MLB104", "titulo": f"Smartwatch Esportivo HD Monitor Cardíaco", "preco_de": "199.00", "preco_por": "89.90", "desconto": 54, "foto": "https://http2.mlstatic.com/D_NQ_NP_794270-MLA48858169123_012022-O.webp"}
+            {"id": "MLB101", "titulo": f"Fone de Ouvido Bluetooth Sem Fio TWS - Oferta Mercado Livre ({termo.capitalize()})", "preco_de": "150.00", "preco_por": "49.90", "desconto": 66, "foto": "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=300&auto=format&fit=crop"},
+            {"id": "MLB102", "titulo": "Monitor Gamer 24' IPS 144Hz Full HD Mercado Livre", "preco_de": "999.00", "preco_por": "649.00", "desconto": 35, "foto": "https://images.unsplash.com/photo-1527443224154-c4a3942d3acf?w=300&auto=format&fit=crop"},
+            {"id": "MLB103", "titulo": "Carregador Rápido USB-C 30W Turbo Power", "preco_de": "89.90", "preco_por": "29.90", "desconto": 66, "foto": "https://images.unsplash.com/photo-1583863788434-e58a36330cf0?w=300&auto=format&fit=crop"},
+            {"id": "MLB104", "titulo": "Smartwatch Esportivo HD Monitor Cardíaco", "preco_de": "199.00", "preco_por": "89.90", "desconto": 54, "foto": "https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=300&auto=format&fit=crop"}
         ]
         
         for item in itens_base:
-            link_original = "https://www.mercadolivre.com.br/sec/exemplo"
+            link_original = "https://www.mercadolivre.com.br"
             item["link_afiliado"] = f"{link_original}?pdp_filters=afiliado:{id_afiliado}"
             novas_ofertas.append(item)
 
-    # Persiste no Banco de Dados SQLite
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     data_hora = time.strftime('%H:%M:%S')
@@ -131,7 +123,6 @@ def garimpar_raiz_mercadolivre(termo="fone", desconto_minimo=0):
     conn.close()
     return novas_ofertas
 
-# --- INTEGRAÇÃO WHATSAPP ---
 def disparar_whatsapp_api(oferta):
     webhook_url = get_config("webhook_whatsapp")
     texto = (
@@ -141,15 +132,12 @@ def disparar_whatsapp_api(oferta):
         f"✅ *Por apenas: R$ {oferta['preco_por']}* (-{oferta['desconto']}% OFF)\n\n"
         f"🛒 *Compre com desconto aqui:* {oferta['link_afiliado']}"
     )
-    
     if webhook_url:
         try:
             requests.post(webhook_url, json={"message": texto, "image": oferta['foto']}, timeout=5)
-            print(f"📲 Disparado via Webhook: {oferta['titulo']}")
         except Exception as e:
-            print(f"Erro ao disparar Webhook: {e}")
+            print(f"Erro no disparo: {e}")
 
-# --- WORKER EM SEGUNDO PLANO ---
 def worker_auto_garimpo():
     while True:
         if get_config("auto_disparo_whatsapp") == "ON":
@@ -159,7 +147,6 @@ def worker_auto_garimpo():
 thread_bot = threading.Thread(target=worker_auto_garimpo, daemon=True)
 thread_bot.start()
 
-# --- ROTAS DA APLICAÇÃO ---
 @app.route('/')
 def index():
     return render_template('index.html')
